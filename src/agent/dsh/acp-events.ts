@@ -7,7 +7,7 @@ import type {
   ToolCallUpdate,
   Usage,
 } from '@agentclientprotocol/sdk';
-import type { AgentEvent } from '../types';
+import type { AgentEvent, AgentModelCatalog, AgentModelOption } from '../types';
 
 /**
  * Translation from ACP (Agent Client Protocol) payloads into the bridge's
@@ -139,4 +139,60 @@ export function translateAcpUsage(
  */
 export function terminationFromStopReason(reason: StopReason): 'normal' | 'interrupted' {
   return reason === 'cancelled' ? 'interrupted' : 'normal';
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function asString(value: unknown): string | undefined {
+  return typeof value === 'string' && value ? value : undefined;
+}
+
+/**
+ * Read the model selector out of a session's `configOptions`.
+ *
+ * The agent owns this list (DSH fronts a LiteLLM gateway whose models come and
+ * go), so it is parsed structurally from whatever the agent just reported
+ * rather than from any bridge-side table. Handles both grouped and flat option
+ * lists because ACP allows either.
+ */
+export function readModelCatalog(configOptions: unknown): AgentModelCatalog {
+  const list = Array.isArray(configOptions) ? configOptions : [];
+  const modelOption = list
+    .map(asRecord)
+    .find((option) => option?.category === 'model' || option?.id === 'model');
+  if (!modelOption) return { options: [] };
+
+  const options: AgentModelOption[] = [];
+  const pushLeaf = (entry: Record<string, unknown>, group?: string): void => {
+    const value = asString(entry.value);
+    if (!value) return;
+    const description = asString(entry.description);
+    options.push({
+      value,
+      label: asString(entry.name) ?? value,
+      ...(group ? { group } : {}),
+      ...(description ? { description } : {}),
+    });
+  };
+
+  for (const raw of Array.isArray(modelOption.options) ? modelOption.options : []) {
+    const entry = asRecord(raw);
+    if (!entry) continue;
+    if (Array.isArray(entry.options)) {
+      const group = asString(entry.name) ?? asString(entry.group);
+      for (const child of entry.options) {
+        const leaf = asRecord(child);
+        if (leaf) pushLeaf(leaf, group);
+      }
+      continue;
+    }
+    pushLeaf(entry);
+  }
+
+  const current = asString(modelOption.currentValue);
+  return { ...(current ? { current } : {}), options };
 }

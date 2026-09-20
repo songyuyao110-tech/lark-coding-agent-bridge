@@ -75,6 +75,25 @@ export interface AgentBotIdentity {
   name?: string;
 }
 
+/**
+ * One selectable model reported by an agent that lets the client choose.
+ * `value` is opaque to the bridge — it is handed back verbatim when applying
+ * the choice, so agents can encode whatever they need (DSH encodes a
+ * `[provider, model]` pair).
+ */
+export interface AgentModelOption {
+  value: string;
+  label: string;
+  group?: string;
+  description?: string;
+}
+
+export interface AgentModelCatalog {
+  /** Value currently in effect for a fresh session, when the agent reports one. */
+  current?: string;
+  options: AgentModelOption[];
+}
+
 export interface AgentAdapter {
   readonly id: string;
   readonly displayName: string;
@@ -82,6 +101,12 @@ export interface AgentAdapter {
   checkAvailability?(): Promise<AgentAvailability>;
   prepareRun?(opts: AgentRunOptions): Promise<void>;
   run(opts: AgentRunOptions): AgentRun;
+  /**
+   * Models the agent currently offers. Must be read from the agent on every
+   * call — never a baked-in list, because an agent's catalog (e.g. a LiteLLM
+   * gateway) changes underneath us. Agents without a model picker omit this.
+   */
+  listModelCatalog?(): Promise<AgentModelCatalog>;
   /**
    * Late-bound identity injection: the adapter is constructed before the
    * channel connects, so the channel calls this once botIdentity is known.

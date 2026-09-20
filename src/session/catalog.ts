@@ -299,7 +299,7 @@ function normalizeSettings(input: unknown): SessionCatalogScopeSettings | undefi
   if (typeof raw.scopeId !== 'string' || typeof raw.updatedAt !== 'number') return undefined;
   const selectedModels: Partial<Record<CatalogAgentId, string>> = {};
   if (raw.selectedModels && typeof raw.selectedModels === 'object') {
-    for (const agentId of ['claude', 'codex', 'opencode'] as const) {
+    for (const agentId of ['claude', 'codex', 'opencode', 'dsh'] as const) {
       const value = raw.selectedModels[agentId];
       if (typeof value === 'string') selectedModels[agentId] = value;
     }

@@ -27,7 +27,8 @@ import type {
   AgentRun,
   AgentRunOptions,
 } from '../types';
-import { terminationFromStopReason, translateAcpUpdate, translateAcpUsage } from './acp-events';
+import { terminationFromStopReason, readModelCatalog, translateAcpUpdate, translateAcpUsage } from './acp-events';
+import type { AgentModelCatalog } from '../types';
 
 /** Bridge-managed ACP profile this adapter boots. */
 export const DEFAULT_DSH_ACP_PROFILE = 'dsh-acp';
@@ -199,13 +200,76 @@ export class DshAdapter implements AgentAdapter {
     }
   }
 
-  run(opts: AgentRunOptions): AgentRun {
-    if (!opts.cwd) throw new Error('cwd is required for DshAdapter.run');
+  /**
+   * Boot a throwaway session purely to read the agent's current model list.
+   * ACP exposes no global catalog, so a session is the only way to ask — and
+   * asking is the point: the gateway's models change, so this is never cached.
+   */
+  async listModelCatalog(): Promise<AgentModelCatalog> {
+    const cwd = process.cwd();
+    const child = spawnProcess(this.binaryPath, ['--profile', this.profileName], {
+      cwd,
+      env: this.childEnv(),
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }) as DshChild;
 
-    const env = mergeProcessEnv(process.env, {
+    const stderrChunks: Buffer[] = [];
+    child.stderr.on('data', (chunk: Buffer) => stderrChunks.push(chunk));
+
+    const client: Client = {
+      requestPermission: (): RequestPermissionResponse => ({
+        outcome: { outcome: 'cancelled' },
+      }),
+      sessionUpdate: (): void => {},
+    };
+    const connection = new ClientSideConnection(
+      () => client,
+      ndJsonStream(
+        Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
+        Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
+      ),
+    );
+
+    let sessionId: string | undefined;
+    try {
+      await connection.initialize({
+        protocolVersion: PROTOCOL_VERSION,
+        clientCapabilities: {},
+      });
+      const session = await connection.newSession({ cwd, mcpServers: [] });
+      sessionId = session.sessionId;
+      return readModelCatalog(session.configOptions);
+    } catch (err) {
+      const detail = Buffer.concat(stderrChunks).toString('utf8').trim();
+      const message = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `failed to read the DSH model catalog: ${message}${detail ? `: ${detail.slice(0, 300)}` : ''}`,
+      );
+    } finally {
+      if (sessionId) {
+        try {
+          await connection.closeSession({ sessionId: sessionId as SessionId });
+        } catch {
+          // Best-effort cleanup; the process is killed regardless.
+        }
+      }
+      child.kill('SIGTERM');
+      const killTimer = setTimeout(() => child.kill('SIGKILL'), 2000);
+      killTimer.unref?.();
+    }
+  }
+
+  private childEnv(): NodeJS.ProcessEnv {
+    return mergeProcessEnv(process.env, {
       ...(this.dshHome ? { DSH_HOME: this.dshHome } : {}),
       DSH_PERMISSION_MODE: this.permissionMode,
     });
+  }
+
+  run(opts: AgentRunOptions): AgentRun {
+    if (!opts.cwd) throw new Error('cwd is required for DshAdapter.run');
+
+    const env = this.childEnv();
 
     const child = spawnProcess(this.binaryPath, ['--profile', this.profileName], {
       cwd: opts.cwd,
@@ -298,6 +362,22 @@ export class DshAdapter implements AgentAdapter {
           clientCapabilities: {},
         });
         sessionId = await startSession(connection, opts, opts.cwd as string);
+        // A stored choice can go stale (LiteLLM catalogs change), so a failed
+        // apply downgrades to the profile default instead of failing the turn.
+        if (opts.model) {
+          try {
+            await connection.setSessionConfigOption({
+              sessionId: sessionId as SessionId,
+              configId: 'model',
+              value: opts.model,
+            });
+          } catch (err) {
+            log.warn('agent', 'dsh-model-apply-failed', {
+              model: opts.model,
+              error: err instanceof Error ? err.message : String(err),
+            });
+          }
+        }
         queue.push({
           type: 'system',
           sessionId,

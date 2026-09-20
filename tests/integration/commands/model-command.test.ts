@@ -68,7 +68,7 @@ describe('/model command', () => {
 
     const claude = await createHarness('claude');
     await claude.run('/model');
-    expect(JSON.stringify(claude.channel.sent[0]?.content)).toContain('仅 OpenCode profile 可用');
+    expect(JSON.stringify(claude.channel.sent[0]?.content)).toContain('仅 OpenCode / DSH profile 可用');
   });
 
   it('does not require model catalog lookup when rendering the common model card', async () => {

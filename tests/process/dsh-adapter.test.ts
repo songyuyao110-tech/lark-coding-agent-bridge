@@ -96,4 +96,47 @@ describeE2E('DshAdapter E2E (real ACP harness)', () => {
     },
     RUN_TIMEOUT_MS,
   );
+
+  it(
+    'reads the model catalog live from the harness',
+    async () => {
+      const adapter = makeAdapter();
+      const catalog = await adapter.listModelCatalog();
+
+      expect(catalog.options.length).toBeGreaterThan(0);
+      expect(catalog.current).toBeTruthy();
+      // The harness fronts a LiteLLM gateway. If this list ever came from a
+      // bridge-side table instead of the agent, gateway models would vanish
+      // the moment the gateway changed.
+      expect(catalog.options.some((option) => option.value.includes('litellm'))).toBe(true);
+      // eslint-disable-next-line no-console
+      console.log('[dsh-e2e] current model =', catalog.current, '| options =', catalog.options.length);
+    },
+    RUN_TIMEOUT_MS,
+  );
+
+  it(
+    'applies a chat-selected model and still completes the turn',
+    async () => {
+      const adapter = makeAdapter();
+      const catalog = await adapter.listModelCatalog();
+      const chosen =
+        catalog.options.find((option) => option.value.includes('deepseek-v4.1-flash-bailian')) ??
+        catalog.options[0];
+      expect(chosen).toBeTruthy();
+
+      const events = await collect(
+        adapter.run({
+          runId: 'e2e-model',
+          prompt: 'Reply with exactly: MODEL_APPLIED',
+          cwd: '/tmp',
+          model: chosen?.value,
+        }).events,
+      );
+
+      expect(textOf(events)).toContain('MODEL_APPLIED');
+      expect(events.at(-1)).toMatchObject({ type: 'done', terminationReason: 'normal' });
+    },
+    RUN_TIMEOUT_MS,
+  );
 });

@@ -143,13 +143,19 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
   }
 
   let execution: RunExecution;
-  const model =
-    input.capability.agentId === 'opencode'
-      ? input.sessionCatalog?.selectedModel(input.scopeId, 'opencode')
+  // Agents with a chat-level model picker read their choice here; the adapter
+  // is responsible for applying it (DSH does so over ACP config options).
+  const pickerAgent =
+    input.capability.agentId === 'opencode' || input.capability.agentId === 'dsh'
+      ? input.capability.agentId
       : undefined;
-  if (input.capability.agentId === 'opencode') {
+  const model = pickerAgent
+    ? input.sessionCatalog?.selectedModel(input.scopeId, pickerAgent)
+    : undefined;
+  if (pickerAgent) {
     log.info('model', 'apply', {
       scopeId: input.scopeId,
+      agent: pickerAgent,
       model: model ?? 'profile-default',
       source: model ? 'chat-selected' : 'profile-default',
     });

@@ -1,8 +1,17 @@
+import type { AgentModelOption } from '../agent/types';
+
 interface ButtonSpec {
   text: string;
   value: Record<string, unknown>;
   style?: 'primary' | 'danger' | 'default';
 }
+
+/**
+ * Feishu renders a long `select_static` poorly and rejects very large option
+ * sets, so cap the picker and point at `/model set` for the remainder. The
+ * list is fetched live, so this cap never hides a model permanently.
+ */
+const DSH_MODEL_PICKER_LIMIT = 50;
 
 export const COMMON_OPENCODE_MODELS = [
   { id: 'nexus/gpt-5.5', label: '公司 GPT-5.5' },
@@ -241,4 +250,119 @@ function escapeMd(s: string): string {
 
 function escapeCode(s: string): string {
   return s.replace(/`/g, "'");
+}
+
+/**
+ * DSH model picker.
+ *
+ * Options come from the agent at call time, so the card always reflects what
+ * the harness currently offers; the chosen value is opaque and is applied
+ * through the ACP config option when the next run starts.
+ *
+ * Built as a CardKit 2.0 card (`createCard`), which is what supports forms and
+ * `select_static` — the v1 `div`/`lark_md` shape used elsewhere in this file
+ * does not.
+ */
+export function dshModelSelectCard(input: {
+  current?: string;
+  options: AgentModelOption[];
+}): object {
+  const shown = input.options.slice(0, DSH_MODEL_PICKER_LIMIT);
+  const currentOption = input.options.find((option) => option.value === input.current);
+  const currentText = currentOption
+    ? `**${escapeMd(currentOption.label)}**${currentOption.group ? ` _(${escapeMd(currentOption.group)})_` : ''}`
+    : input.current
+      ? `\`${escapeCode(input.current)}\``
+      : 'profile 默认（当前 chat 未覆盖）';
+
+  const elements: object[] = [
+    { tag: 'markdown', content: '🤖 **选择 DSH 模型**' },
+    { tag: 'markdown', content: `当前模型：${currentText}` },
+    {
+      tag: 'markdown',
+      content: '_列表实时读取自 DSH，LiteLLM 侧新增或下线的模型会自动反映，无需重启。_',
+    },
+    { tag: 'hr' },
+  ];
+
+  if (shown.length === 0) {
+    elements.push({
+      tag: 'markdown',
+      content: '⚠️ DSH 没有返回任何可选模型，请检查 harness 的 provider 配置。',
+    });
+    return dshCardShell(elements);
+  }
+
+  elements.push({
+    tag: 'form',
+    name: 'dsh_model_form',
+    elements: [
+      {
+        tag: 'select_static',
+        name: 'model',
+        ...(currentOption ? { initial_option: currentOption.value } : {}),
+        options: shown.map((option) => ({
+          text: {
+            tag: 'plain_text',
+            content: option.group ? `[${option.group}] ${option.label}` : option.label,
+          },
+          value: option.value,
+        })),
+      },
+      {
+        tag: 'column_set',
+        flex_mode: 'flow',
+        horizontal_spacing: 'small',
+        columns: [
+          {
+            tag: 'column',
+            width: 'auto',
+            elements: [
+              {
+                tag: 'button',
+                name: 'dsh_model_apply',
+                text: { tag: 'plain_text', content: '应用' },
+                type: 'primary',
+                form_action_type: 'submit',
+                behaviors: [{ type: 'callback', value: { cmd: 'model.apply' } }],
+              },
+            ],
+          },
+          {
+            tag: 'column',
+            width: 'auto',
+            elements: [
+              {
+                tag: 'button',
+                name: 'dsh_model_reset',
+                text: { tag: 'plain_text', content: '恢复默认' },
+                behaviors: [{ type: 'callback', value: { cmd: 'model.reset' } }],
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  elements.push(
+    { tag: 'hr' },
+    {
+      tag: 'markdown',
+      content:
+        input.options.length > shown.length
+          ? `_仅列出前 ${shown.length} 个，共 ${input.options.length} 个。其余可用 \`/model set <provider>/<model>\` 指定。_`
+          : '也可发送 `/model set <provider>/<model>` 直接指定。',
+    },
+  );
+
+  return dshCardShell(elements);
+}
+
+function dshCardShell(elements: object[]): object {
+  return {
+    schema: '2.0',
+    config: { summary: { content: '选择 DSH 模型' } },
+    body: { elements },
+  };
 }

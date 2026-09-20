@@ -24,7 +24,14 @@ import {
 import { GROUP_MSG_SCOPE, hasGroupMsgScope } from '../bot/app-scope';
 import { requestScopeGrantLink } from '../bot/wizard';
 import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/managed';
-import { helpCard, modelSelectCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
+import {
+  dshModelSelectCard,
+  helpCard,
+  modelSelectCard,
+  resumeCard,
+  statusCard,
+  workspacesCard,
+} from '../card/templates';
 import type { AppConfig, AppPreferences, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
   getAgentStopGraceMs,
@@ -829,8 +836,12 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
 }
 
 async function handleModel(args: string, ctx: CommandContext): Promise<void> {
+  if (ctx.controls.profileConfig.agentKind === 'dsh' || ctx.agent.id === 'dsh') {
+    await handleDshModel(args, ctx);
+    return;
+  }
   if (ctx.controls.profileConfig.agentKind !== 'opencode' || ctx.agent.id !== 'opencode') {
-    await reply(ctx, '`/model` 仅 OpenCode profile 可用。');
+    await reply(ctx, '`/model` 仅 OpenCode / DSH profile 可用。');
     return;
   }
   if (!ctx.sessionCatalog) {
@@ -877,6 +888,111 @@ async function handleModel(args: string, ctx: CommandContext): Promise<void> {
   }
   ctx.sessionCatalog.setSelectedModel(ctx.scope, 'opencode', modelId);
   await reply(ctx, `已为当前 chat 设置 OpenCode 模型：\`${modelId}\``);
+}
+
+/**
+ * `/model` for DSH. The model list is never hardcoded: the harness fronts a
+ * LiteLLM gateway whose catalog changes, so options are read from the live ACP
+ * session every time the picker opens and again when a choice is applied.
+ */
+async function handleDshModel(args: string, ctx: CommandContext): Promise<void> {
+  const catalogStore = ctx.sessionCatalog;
+  if (!catalogStore) {
+    await reply(ctx, '❌ 当前未启用 session catalog，无法保存 chat 级模型选择。');
+    return;
+  }
+  const listCatalog = ctx.agent.listModelCatalog;
+  if (!listCatalog) {
+    await reply(ctx, '❌ 当前 DSH 适配器不支持模型切换。');
+    return;
+  }
+
+  const trimmed = args.trim();
+  const sub = trimmed === 'list' ? '' : trimmed;
+  const selected = catalogStore.selectedModel(ctx.scope, 'dsh');
+
+  if (!sub) {
+    let live;
+    try {
+      live = await listCatalog.call(ctx.agent);
+    } catch (err) {
+      const detail = err instanceof Error && err.message ? `\n\n详情：${err.message}` : '';
+      await reply(ctx, `❌ 无法从 DSH 读取模型列表，请稍后重试。${detail}`);
+      return;
+    }
+    await sendManagedCard(
+      ctx.channel,
+      ctx.msg.chatId,
+      dshModelSelectCard({ current: selected ?? live.current, options: live.options }),
+      { replyTo: ctx.msg.messageId },
+    );
+    return;
+  }
+
+  if (sub === 'reset' || sub === 'default') {
+    const changed = catalogStore.clearSelectedModel(ctx.scope, 'dsh');
+    await reply(
+      ctx,
+      changed
+        ? '已恢复为 profile 默认模型，下条消息生效。'
+        : '当前 chat 未设置模型覆盖。',
+    );
+    return;
+  }
+
+  // Submitted from the picker card; the form field carries the ACP value id.
+  if (sub === 'apply') {
+    const picked = ctx.formValue?.model;
+    if (typeof picked !== 'string' || !picked) {
+      await reply(ctx, '❌ 没有读到所选的模型，请重新发送 `/model`。');
+      return;
+    }
+    await applyDshModel(ctx, catalogStore, listCatalog, picked);
+    return;
+  }
+
+  const setMatch = sub.match(/^set\s+(.+)$/);
+  if (!setMatch?.[1]?.trim()) {
+    await reply(ctx, '用法：`/model`、`/model set <provider>/<model>`、`/model reset`');
+    return;
+  }
+  const spec = setMatch[1].trim();
+  // Accept either the raw ACP value id or a friendlier `provider/model`.
+  const slash = spec.indexOf('/');
+  const value =
+    spec.startsWith('[') || slash <= 0
+      ? spec
+      : JSON.stringify([spec.slice(0, slash), spec.slice(slash + 1)]);
+  await applyDshModel(ctx, catalogStore, listCatalog, value);
+}
+
+async function applyDshModel(
+  ctx: CommandContext,
+  catalogStore: SessionCatalog,
+  listCatalog: NonNullable<AgentAdapter['listModelCatalog']>,
+  value: string,
+): Promise<void> {
+  let live;
+  try {
+    live = await listCatalog.call(ctx.agent);
+  } catch (err) {
+    const detail = err instanceof Error && err.message ? `\n\n详情：${err.message}` : '';
+    await reply(ctx, `❌ 无法校验模型是否仍然可用。${detail}`);
+    return;
+  }
+  const match = live.options.find((option) => option.value === value);
+  if (!match) {
+    await reply(
+      ctx,
+      `❌ DSH 当前不提供这个模型（可能已下线）：\`${value.replace(/`/g, "'")}\`\n\n发送 \`/model\` 查看实时列表。`,
+    );
+    return;
+  }
+  catalogStore.setSelectedModel(ctx.scope, 'dsh', value);
+  await reply(
+    ctx,
+    `已为当前 chat 设置 DSH 模型：**${match.label}**${match.group ? `（${match.group}）` : ''}，下条消息生效。`,
+  );
 }
 
 function formatModelList(models: OpenCodeModelEntry[], selected?: string, defaultModel?: string): string {
