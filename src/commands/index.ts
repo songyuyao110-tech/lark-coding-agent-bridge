@@ -3,8 +3,9 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { claudeCapability, codexCapability, opencodeCapability } from '../agent/capability';
 import type { AgentAdapter } from '../agent/types';
+import { OpenCodeModelCatalog, type OpenCodeModelEntry } from '../agent/opencode/model-catalog';
 import type { ActiveRuns } from '../bot/active-runs';
 import {
   accountCurrentCard,
@@ -23,7 +24,7 @@ import {
 import { GROUP_MSG_SCOPE, hasGroupMsgScope } from '../bot/app-scope';
 import { requestScopeGrantLink } from '../bot/wizard';
 import { forgetManagedCard, sendManagedCard, updateManagedCard } from '../card/managed';
-import { helpCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
+import { helpCard, modelSelectCard, resumeCard, statusCard, workspacesCard } from '../card/templates';
 import type { AppConfig, AppPreferences, MessageReplyMode, TenantBrand } from '../config/schema';
 import {
   getAgentStopGraceMs,
@@ -132,6 +133,7 @@ export interface CommandContext {
     options: ListCodexThreadHistoryOptions,
   ) => Promise<CodexThreadHistoryEntry[]>;
   claudeHistoryProvider?: (cwd: string, limit: number) => Promise<SessionSummary[]>;
+  opencodeModelCatalog?: Pick<OpenCodeModelCatalog, 'list' | 'has' | 'resolveDefaultModel'>;
   /** Set when invoked from a CardKit 2.0 form submit. Keys are input `name`s. */
   formValue?: Record<string, unknown>;
   /** True when this invocation came from a card button click rather than a
@@ -144,7 +146,7 @@ type Handler = (args: string, ctx: CommandContext) => Promise<void>;
 
 interface ResumeCandidate {
   scopeId: string;
-  agentId: 'claude' | 'codex';
+  agentId: 'claude' | 'codex' | 'opencode';
   cwdRealpath: string;
   policyFingerprint: string;
   sessionId?: string;
@@ -164,6 +166,7 @@ const handlers: Record<string, Handler> = {
   '/ws': handleWs,
   '/resume': handleResume,
   '/status': handleStatus,
+  '/model': handleModel,
   '/help': handleHelp,
   '/account': handleAccount,
   '/config': handleConfig,
@@ -177,6 +180,8 @@ const handlers: Record<string, Handler> = {
   '/invite': handleInvite,
   '/remove': handleRemove,
 };
+
+const openCodeCatalogByBinary = new Map<string, OpenCodeModelCatalog>();
 
 /**
  * Commands that can mutate credentials, lifecycle, filesystem reach, or
@@ -303,7 +308,8 @@ function isAbsoluteOrTilde(p: string): boolean {
 }
 
 async function handleNew(args: string, ctx: CommandContext): Promise<void> {
-  const trimmed = args.trim();
+  const raw = args.trim();
+  const trimmed = raw === 'list' ? '' : raw;
 
   // /new chat [name]  — spin up a fresh group chat bound to a fresh session
   if (trimmed === 'chat' || trimmed.startsWith('chat ')) {
@@ -572,7 +578,9 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const sessions = await listClaudeResumeHistory(ctx, cwd, limit);
+  const sessions = ctx.controls.profileConfig.agentKind === 'opencode'
+    ? []
+    : await listClaudeResumeHistory(ctx, cwd, limit);
   const currentSession = ctx.sessions.getRaw(ctx.scope);
   const identity = ctx.sessionCatalogIdentity;
   const entries = sessions.map((s) => ({
@@ -606,7 +614,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
       } else {
         ctx.sessionCatalog.upsertActive({
           scopeId: ctx.sessionCatalogIdentity.scopeId,
-          agentId: 'claude',
+           agentId: ctx.sessionCatalogIdentity.agentId,
           cwdRealpath: ctx.sessionCatalogIdentity.cwdRealpath,
           policyFingerprint: ctx.sessionCatalogIdentity.policyFingerprint,
           sessionId: resolved.sessionId!,
@@ -626,7 +634,7 @@ async function applyResume(sessionId: string, ctx: CommandContext): Promise<void
       return;
     }
     ctx.activeRuns.interrupt(ctx.scope);
-    if (ctx.sessionCatalogIdentity.agentId === 'claude') {
+    if (ctx.sessionCatalogIdentity.agentId === 'claude' || ctx.sessionCatalogIdentity.agentId === 'opencode') {
       ctx.sessions.set(ctx.scope, sessionId, ctx.sessionCatalogIdentity.cwdRealpath);
     }
     await reply(ctx, RESUME_APPLIED_REPLY);
@@ -679,7 +687,7 @@ function consumeResumeCandidate(
     candidate.agentId !== identity.agentId ||
     candidate.cwdRealpath !== identity.cwdRealpath ||
     candidate.policyFingerprint !== identity.policyFingerprint ||
-    (identity.agentId === 'claude' && !candidate.sessionId) ||
+    ((identity.agentId === 'claude' || identity.agentId === 'opencode') && !candidate.sessionId) ||
     (identity.agentId === 'codex' && !candidate.threadId)
   ) {
     return undefined;
@@ -814,6 +822,89 @@ async function handleStatus(_args: string, ctx: CommandContext): Promise<void> {
     chatMode: ctx.chatMode,
   });
   await ctx.channel.send(ctx.msg.chatId, { card }, { replyTo: ctx.msg.messageId });
+}
+
+async function handleModel(args: string, ctx: CommandContext): Promise<void> {
+  if (ctx.controls.profileConfig.agentKind !== 'opencode' || ctx.agent.id !== 'opencode') {
+    await reply(ctx, '`/model` 仅 OpenCode profile 可用。');
+    return;
+  }
+  if (!ctx.sessionCatalog) {
+    await reply(ctx, '❌ 当前未启用 session catalog，无法保存 chat 级模型选择。');
+    return;
+  }
+  const raw = args.trim();
+  const trimmed = raw === 'list' ? '' : raw;
+  const catalog = ctx.opencodeModelCatalog ?? getOpenCodeModelCatalog(ctx);
+
+  if (!trimmed) {
+    let defaultModel: string | undefined;
+    try {
+      defaultModel = await catalog.resolveDefaultModel?.();
+    } catch (err) {
+      const detail = err instanceof Error && err.message ? `\n\n详情：${err.message}` : '';
+      await reply(ctx, `❌ 当前无法获取 OpenCode 模型列表。请稍后重试。${detail}`);
+      return;
+    }
+    const selected = ctx.sessionCatalog.selectedModel(ctx.scope, 'opencode');
+    await ctx.channel.send(
+      ctx.msg.chatId,
+      { card: modelSelectCard(selected ?? defaultModel) },
+      { replyTo: ctx.msg.messageId },
+    );
+    return;
+  }
+
+  if (trimmed === 'reset') {
+    const changed = ctx.sessionCatalog.clearSelectedModel(ctx.scope, 'opencode');
+    await reply(ctx, changed ? '已重置当前 chat 的 OpenCode 模型，后续使用 profile 默认模型。' : '当前 chat 未设置模型覆盖。');
+    return;
+  }
+
+  const setMatch = trimmed.match(/^set\s+(.+)$/);
+  if (!setMatch) {
+    await reply(ctx, '用法：`/model`、`/model set <provider/model>`、`/model reset`');
+    return;
+  }
+  const modelId = setMatch[1]?.trim();
+  if (!modelId) {
+    await reply(ctx, '用法：`/model set <provider/model>`');
+    return;
+  }
+  ctx.sessionCatalog.setSelectedModel(ctx.scope, 'opencode', modelId);
+  await reply(ctx, `已为当前 chat 设置 OpenCode 模型：\`${modelId}\``);
+}
+
+function formatModelList(models: OpenCodeModelEntry[], selected?: string, defaultModel?: string): string {
+  if (models.length === 0) {
+    return '未发现当前 OpenCode 已配置 provider 下的可用模型。请先运行 `opencode providers list` 检查登录/环境变量。';
+  }
+  const current = selected ?? defaultModel;
+  const lines = [
+    `当前模型：${current ? `\`${current}\`` : 'profile 默认（未显式指定）'}`,
+    '',
+    '可用模型：',
+  ];
+  let lastProvider = '';
+  for (const model of models) {
+    if (model.provider !== lastProvider) {
+      lines.push('', `**${model.provider}**`);
+      lastProvider = model.provider;
+    }
+    const marker = model.id === selected ? ' ✅' : '';
+    lines.push(`- \`${model.id}\`${marker}`);
+  }
+  lines.push('', '切换：`/model set <provider/model>`', '重置：`/model reset`');
+  return lines.join('\n');
+}
+
+function getOpenCodeModelCatalog(ctx: CommandContext): OpenCodeModelCatalog {
+  const binaryPath = ctx.controls.profileConfig.opencode?.binaryPath ?? process.env.LARK_CHANNEL_OPENCODE_BIN ?? 'opencode';
+  const hit = openCodeCatalogByBinary.get(binaryPath);
+  if (hit) return hit;
+  const created = new OpenCodeModelCatalog({ binaryPath });
+  openCodeCatalogByBinary.set(binaryPath, created);
+  return created;
 }
 
 function formatOwnerState(ctx: CommandContext): string {
@@ -1106,9 +1197,10 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   }
   doctorLastByOperator.set(rateKey, now);
 
-  const capability =
-    ctx.controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(ctx.controls.profileConfig)
+  const capability = ctx.controls.profileConfig.agentKind === 'codex'
+    ? codexCapability(ctx.controls.profileConfig)
+    : ctx.controls.profileConfig.agentKind === 'opencode'
+      ? opencodeCapability(ctx.controls.profileConfig)
       : claudeCapability(ctx.controls.profileConfig);
   const policy = evaluateRunPolicy({
     scope: {

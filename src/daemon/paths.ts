@@ -2,6 +2,7 @@ import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { resolveAppPaths } from '../config/app-paths';
 import { paths } from '../config/paths';
+import type { AgentKind } from '../config/profile-schema';
 
 /**
  * Logical service name — used as the launchd label AND as the systemd
@@ -21,6 +22,18 @@ export function serviceProfileId(profile: string): string {
 
 export function serviceNameForProfile(profile: string = paths.profile): string {
   return `${SERVICE_NAME}.${serviceProfileId(profile)}`;
+}
+
+/**
+ * Human/service-manager label for diagnostics. The profile is already part of
+ * the actual OS service id, so this deliberately does not alter existing
+ * launchd/systemd/task names while OpenCode has no adapter yet.
+ */
+export function serviceLabelForAgent(
+  profile: string = paths.profile,
+  agentKind: AgentKind = 'claude',
+): string {
+  return `${serviceNameForProfile(profile)} (${agentKind})`;
 }
 
 // === macOS launchd ===

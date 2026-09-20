@@ -68,6 +68,7 @@ interface FakeLarkChannel {
 }
 
 type StreamFn = FakeLarkChannel['stream'];
+type SendFn = FakeLarkChannel['send'];
 
 const cleanups: Array<() => Promise<void>> = [];
 
@@ -156,11 +157,66 @@ describe('markdown stream startup failures', () => {
       ),
     );
   }, 10_000);
+
+  it('retries transient fallback send timeouts after stream startup fails', async () => {
+    let sendAttempts = 0;
+    const sent: FakeLarkChannel['sent'] = [];
+    const h = await createHarness({
+      stream: async () => {
+        throw new Error('stream startup failed');
+      },
+      send: async (chatId, content, options) => {
+        sendAttempts += 1;
+        if (sendAttempts === 1) {
+          const err = new Error('timeout of 30000ms exceeded') as Error & { code: string };
+          err.code = 'send_timeout';
+          throw err;
+        }
+        sent.push({ chatId, content, options });
+      },
+    });
+    h.channel.sent = sent;
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await waitFor(() => sendAttempts === 2, 3000);
+
+    expect(h.agent.runOptions.length).toBe(1);
+    expect(lastMarkdown(h.channel)).toContain('agent 失败');
+  });
+
+  it('does not keep the IM queue blocked while stream terminal cleanup is stuck', async () => {
+    let producerStarted = false;
+    const h = await createHarness({
+      stream: async (_chatId, input) => {
+        const producer = (input as {
+          markdown?: (ctrl: { setContent(markdown: string): Promise<void> }) => Promise<void>;
+        }).markdown;
+        if (producer) {
+          producerStarted = true;
+          await producer({ setContent: vi.fn(async () => {}) });
+        }
+        await new Promise<void>(() => {});
+      },
+    });
+    await startTestBridge(h);
+
+    await h.channel.handlers.message?.(message('om_first', 'first'));
+    await waitFor(() => producerStarted);
+    await waitFor(
+      () => h.channel.rawClient.im.v1.messageReaction.delete.mock.calls.length > 0,
+      4500,
+    );
+
+    await h.channel.handlers.message?.(message('om_second', 'second'));
+    await waitFor(() => h.agent.runOptions.length === 2);
+  }, 10_000);
 });
 
 async function createHarness(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
+  send?: SendFn;
 } = {}): Promise<{
   tmp: TmpProfile;
   channel: FakeLarkChannel;
@@ -249,6 +305,7 @@ async function startTestBridge(h: {
 function createFakeLarkChannel(options: {
   reactionCreate?: () => Promise<{ data: { reaction_id: string } }>;
   stream?: StreamFn;
+  send?: SendFn;
 } = {}): FakeLarkChannel {
   const handlers: MessageHandlerMap = {};
   const sent: FakeLarkChannel['sent'] = [];
@@ -290,9 +347,9 @@ function createFakeLarkChannel(options: {
     getConnectionStatus() {
       return { state: 'connected', reconnectAttempts: 0 };
     },
-    async send(chatId, content, options) {
+    send: options.send ?? (async (chatId, content, options) => {
       sent.push({ chatId, content, options });
-    },
+    }),
     stream: options.stream ?? (async () => {
       await new Promise<void>(() => {});
     }),

@@ -2,10 +2,13 @@ import type {
   LarkChannel,
   LarkChannelOptions,
   NormalizedMessage,
+  SendInput,
+  SendOptions,
+  SendResult,
 } from '@larksuite/channel';
 import { createLarkChannel } from '@larksuite/channel';
 import { dirname, join } from 'node:path';
-import { claudeCapability, codexCapability } from '../agent/capability';
+import { claudeCapability, codexCapability, opencodeCapability } from '../agent/capability';
 import {
   buildAgentPrompt,
   type BridgePromptInteractiveCard,
@@ -17,6 +20,7 @@ import { handleCardAction } from '../card/dispatcher';
 import { CallbackAuth } from '../card/callback-auth';
 import { CallbackNonceStore } from '../card/callback-store';
 import { renderCard } from '../card/run-renderer';
+import { streamManagedCard } from '../card/stream';
 import {
   finalizeIfRunning,
   initialState,
@@ -56,6 +60,7 @@ import { handleCommentMention } from './comments';
 import { recordRunSessionEvent, startRunFlow } from './run-flow';
 import { commandSessionCatalogIdentity } from './session-catalog-identity';
 import { startKeepalive } from './keepalive';
+import { retryOutbound } from './outbound-retry';
 import { PendingQueue } from './pending-queue';
 import { ProcessPool } from './process-pool';
 import { fetchQuotedContext, type QuotedContext } from './quote';
@@ -464,21 +469,6 @@ function startKnownChatsRefreshTimer(
   };
 }
 
-async function sendNonAllowedGroupHint(
-  channel: LarkChannel,
-  chatId: string,
-  replyToMessageId: string,
-): Promise<void> {
-  const text =
-    '当前群尚未加入响应列表，所以 bot 不会处理消息。\n' +
-    'Bot owner/管理员可在本群发 /invite group 加入白名单。';
-  try {
-    await channel.send(chatId, { text }, { replyTo: replyToMessageId });
-  } catch {
-    await channel.send(chatId, { text });
-  }
-}
-
 interface IntakeDeps {
   channel: LarkChannel;
   agent: AgentAdapter;
@@ -535,11 +525,6 @@ async function intakeMessage(deps: IntakeDeps): Promise<void> {
       sender: msg.senderId.slice(-6),
       reason: accessDecision.reason,
     });
-    if (msg.chatType !== 'p2p' && accessDecision.reason === 'denied-chat' && msg.mentionedBot) {
-      void sendNonAllowedGroupHint(channel, msg.chatId, msg.messageId).catch((err) =>
-        log.warn('intake', 'non-allowed-hint-failed', { err: String(err) }),
-      );
-    }
     return;
   }
 
@@ -691,9 +676,10 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     actorId: firstMsg.senderId,
     ...(threadId ? { threadId } : {}),
   };
-  const capability =
-    controls.profileConfig.agentKind === 'codex'
-      ? codexCapability(controls.profileConfig)
+  const capability = controls.profileConfig.agentKind === 'codex'
+    ? codexCapability(controls.profileConfig)
+    : controls.profileConfig.agentKind === 'opencode'
+      ? opencodeCapability(controls.profileConfig)
       : claudeCapability(controls.profileConfig);
   const flow = await startRunFlow({
     scopeId: scope,
@@ -723,7 +709,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       source: 'im',
       code: flow.rejectReason.code,
     });
-    await channel.send(chatId, { markdown: flow.rejectReason.userVisible }, sendOpts);
+    await sendWithRetry(channel, chatId, { markdown: flow.rejectReason.userVisible }, sendOpts);
     return;
   }
 
@@ -817,18 +803,15 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
           }
         },
       );
-      const streamDone = channel.stream(
+      const streamDone = streamManagedCard(
+        channel,
         chatId,
-        {
-          card: {
-            initial: renderCard(initialState, cardRenderOptions),
-            producer: async (ctrl) => {
-              producerStarted = true;
-              cardCtrl = ctrl;
-              await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
-              await renderDone;
-            },
-          },
+        renderCard(initialState, cardRenderOptions),
+        async (ctrl) => {
+          producerStarted = true;
+          cardCtrl = ctrl;
+          await ctrl.update(renderCard(filterForPrefs(latestState), cardRenderOptions));
+          await renderDone;
         },
         sendOpts,
       );
@@ -838,7 +821,8 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         renderDone,
         producerStarted: () => producerStarted,
         fallback: async (state) => {
-          await channel.send(
+          await sendWithRetry(
+            channel,
             chatId,
             { card: renderCard(filterForPrefs(state), cardRenderOptions) },
             sendOpts,
@@ -882,7 +866,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
         fallback: async (state) => {
           const body = renderText(filterForPrefs(state));
           if (body.trim()) {
-            await channel.send(chatId, { markdown: body }, sendOpts);
+            await sendWithRetry(channel, chatId, { markdown: body }, sendOpts);
           }
         },
       });
@@ -900,7 +884,7 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
       );
       const body = renderText(filterForPrefs(finalState));
       if (body.trim()) {
-        await channel.send(chatId, { markdown: body }, sendOpts);
+        await sendWithRetry(channel, chatId, { markdown: body }, sendOpts);
       }
     }
   } catch (err) {
@@ -1104,6 +1088,15 @@ async function runFallbackReply(
   } catch (err) {
     log.fail('stream', err, { mode, step: 'fallback' });
   }
+}
+
+function sendWithRetry(
+  channel: LarkChannel,
+  to: string,
+  input: SendInput,
+  opts?: SendOptions,
+): Promise<SendResult> {
+  return retryOutbound('send', () => channel.send(to, input, opts));
 }
 
 function scheduleWorkingReactionCleanup(

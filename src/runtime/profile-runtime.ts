@@ -6,6 +6,7 @@ import { detectInstalledAgents, type DetectedAgent } from '../cli/agent-detectio
 import {
   createBootstrapCodexConfig,
   createBootstrapProfileConfig,
+  createBootstrapOpencodeConfig,
   resolveBootstrapWorkspace,
 } from '../cli/profile-bootstrap';
 import { promptPassword } from '../cli/prompt';
@@ -90,6 +91,9 @@ export function createRuntimeProfileConfig(
     ...(input.agentKind === 'codex'
       ? { codex: input.codex ?? { binaryPath: process.env.LARK_CHANNEL_CODEX_BIN ?? 'codex' } }
       : {}),
+    ...(input.agentKind === 'opencode'
+      ? { opencode: input.opencode ?? { binaryPath: process.env.LARK_CHANNEL_OPENCODE_BIN ?? 'opencode' } }
+      : {}),
   });
 }
 
@@ -137,6 +141,9 @@ export async function resolveProfileRuntime(
     ...(migrationAgent ? { agentKind: migrationAgent } : {}),
     ...(needsMigration && migrationAgent === 'codex'
       ? { codex: await createBootstrapCodexConfig(undefined) }
+      : {}),
+    ...(needsMigration && migrationAgent === 'opencode'
+      ? { opencode: await createBootstrapOpencodeConfig(undefined) }
       : {}),
   }, opts.handleActiveBridgeMigrationConflict);
 
@@ -613,7 +620,9 @@ class UserCancelledError extends Error {
 }
 
 function displayAgentKind(kind: AgentKind): string {
-  return kind === 'claude' ? 'Claude Code' : 'Codex CLI';
+  if (kind === 'claude') return 'Claude Code';
+  if (kind === 'codex') return 'Codex CLI';
+  return 'OpenCode CLI';
 }
 
 async function maybeMigrateRootPlaintextSecret(

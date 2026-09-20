@@ -4,6 +4,7 @@ import { log } from '../core/logger';
 interface ManagedEntry {
   cardId: string;
   sequence: number;
+  updateQueue: Promise<void>;
 }
 
 // Module-local because state is per-process. Lost on restart, which is fine —
@@ -37,7 +38,7 @@ export async function sendManagedCard(
     { cardId },
     opts.replyTo ? { replyTo: opts.replyTo } : undefined,
   );
-  byMessageId.set(messageId, { cardId, sequence: 0 });
+  byMessageId.set(messageId, { cardId, sequence: 0, updateQueue: Promise.resolve() });
   return { messageId, cardId };
 }
 
@@ -56,12 +57,17 @@ export async function updateManagedCard(
     throw new Error(`no managed card registered for message ${messageId}`);
   }
   entry.sequence += 1;
-  try {
-    await channel.updateCardById(entry.cardId, card, entry.sequence);
-  } catch (err) {
-    log.fail('card', err, { step: 'managed-update', cardId: entry.cardId, seq: entry.sequence });
-    throw err;
-  }
+  const sequence = entry.sequence;
+  const update = entry.updateQueue.catch(() => {}).then(async () => {
+    try {
+      await channel.updateCardById(entry.cardId, card, sequence);
+    } catch (err) {
+      log.fail('card', err, { step: 'managed-update', cardId: entry.cardId, seq: sequence });
+      throw err;
+    }
+  });
+  entry.updateQueue = update;
+  await update;
 }
 
 /** True iff we have the card_id mapping for this messageId. */

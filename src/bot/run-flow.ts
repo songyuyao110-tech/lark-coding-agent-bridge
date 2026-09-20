@@ -19,6 +19,7 @@ import { RunRejected, type RunRejectedCode } from '../runtime/errors';
 import type { SessionCatalog } from '../session/catalog';
 import type { SessionStore } from '../session/store';
 import type { WorkspaceStore } from '../workspace/store';
+import { log } from '../core/logger';
 
 export interface StartRunFlowInput {
   scopeId: string;
@@ -127,7 +128,7 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
       resumeFrom = threadId;
     }
   }
-  if (!resumeFrom && input.capability.agentId === 'claude') {
+  if (!resumeFrom && (input.capability.agentId === 'claude' || input.capability.agentId === 'opencode')) {
     resumeFrom = input.sessions.resumeFor(input.scopeId, workspace.cwdRealpath);
     sessionId = resumeFrom;
     const stale = input.sessions.getRaw(input.scopeId);
@@ -137,12 +138,24 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
   }
 
   let execution: RunExecution;
+  const model =
+    input.capability.agentId === 'opencode'
+      ? input.sessionCatalog?.selectedModel(input.scopeId, 'opencode')
+      : undefined;
+  if (input.capability.agentId === 'opencode') {
+    log.info('model', 'apply', {
+      scopeId: input.scopeId,
+      model: model ?? 'profile-default',
+      source: model ? 'chat-selected' : 'profile-default',
+    });
+  }
   try {
     execution = await input.executor.submit({
       scopeId: input.scopeId,
       policy,
       sessionId,
       threadId,
+      model,
       images:
         input.capability.agentId === 'codex'
           ? policy.attachments
@@ -183,12 +196,12 @@ export async function startRunFlow(input: StartRunFlowInput): Promise<StartRunFl
 
 export function recordRunSessionEvent(input: RecordRunSessionEventInput): void {
   if (input.event.type !== 'system') return;
-  if (input.capability.agentId === 'claude' && input.event.sessionId) {
+  if ((input.capability.agentId === 'claude' || input.capability.agentId === 'opencode') && input.event.sessionId) {
     const cwdRealpath = input.event.cwd ?? input.policy.cwdRealpath;
     input.sessions.set(input.scopeId, input.event.sessionId, cwdRealpath);
     input.sessionCatalog?.upsertActive({
       scopeId: input.scopeId,
-      agentId: 'claude',
+      agentId: input.capability.agentId,
       cwdRealpath,
       policyFingerprint: input.policy.policyFingerprint,
       sessionId: input.event.sessionId,

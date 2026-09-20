@@ -14,6 +14,7 @@ export interface BootstrapProfileInput {
   workspace?: string;
   defaultWorkspace?: string;
   codexBinaryPath?: string;
+  opencodeBinaryPath?: string;
   profileDir?: string;
 }
 
@@ -29,12 +30,17 @@ export async function createBootstrapProfileConfig(
     input.agentKind === 'codex'
       ? await createBootstrapCodexConfig(input.codexBinaryPath)
       : undefined;
+  const opencode =
+    input.agentKind === 'opencode'
+      ? await createBootstrapOpencodeConfig(input.opencodeBinaryPath)
+      : undefined;
   const profile = createDefaultProfileConfig({
     agentKind: input.agentKind,
     accounts: input.accounts,
     preferences: input.preferences,
     secrets: input.secrets,
     ...(codex ? { codex } : {}),
+    ...(opencode ? { opencode } : {}),
   });
   if (workspace) {
     profile.workspaces = {
@@ -70,6 +76,25 @@ export async function createBootstrapCodexConfig(binaryPath: string | undefined)
       code: codexBootstrapBinaryErrorCode(errno),
       agentId: 'codex',
       agentName: 'Codex CLI',
+      command,
+      binaryPath: command,
+      errno,
+    });
+  }
+  return { binaryPath: resolvedBinary };
+}
+
+export async function createBootstrapOpencodeConfig(binaryPath: string | undefined) {
+  const command = binaryPath ?? process.env.LARK_CHANNEL_OPENCODE_BIN ?? 'opencode';
+  let resolvedBinary: string;
+  try {
+    resolvedBinary = await resolveExecutablePath(command);
+  } catch (err) {
+    const errno = (err as NodeJS.ErrnoException).code;
+    throw new AgentPreflightError({
+      code: codexBootstrapBinaryErrorCode(errno),
+      agentId: 'opencode',
+      agentName: 'OpenCode CLI',
       command,
       binaryPath: command,
       errno,

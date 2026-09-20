@@ -1,4 +1,4 @@
-import { mkdtemp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -62,6 +62,62 @@ describe('agent-aware session catalog', () => {
       }),
     ).toMatchObject({ threadId: 'thread-1', agentId: 'codex' });
     await catalog.flush();
+  });
+
+  it('loads persisted OpenCode sessions', async () => {
+    const file = await path();
+    const identity = {
+      scopeId: 'chat-1',
+      agentId: 'opencode' as const,
+      cwdRealpath: '/repo',
+      policyFingerprint: 'fp-1',
+    };
+    await writeFile(
+      file,
+      `${JSON.stringify([
+        {
+          key: sessionCatalogKey(identity),
+          ...identity,
+          sessionId: 'opencode-session',
+          status: 'active',
+          updatedAt: 1000,
+        },
+      ])}\n`,
+    );
+    const catalog = new SessionCatalog(file);
+
+    await catalog.load();
+
+    expect(catalog.activeFor(identity)).toMatchObject({
+      agentId: 'opencode',
+      sessionId: 'opencode-session',
+    });
+  });
+
+  it('persists selected models per scope and agent', async () => {
+    const file = await path();
+    const catalog = new SessionCatalog(file);
+
+    catalog.setSelectedModel('chat-1', 'opencode', 'github-copilot/gpt-5.5', 1000);
+    catalog.setSelectedModel('chat-2', 'opencode', 'nexus/gpt-5.5', 2000);
+    await catalog.flush();
+
+    const reloaded = new SessionCatalog(file);
+    await reloaded.load();
+
+    expect(reloaded.selectedModel('chat-1', 'opencode')).toBe('github-copilot/gpt-5.5');
+    expect(reloaded.selectedModel('chat-2', 'opencode')).toBe('nexus/gpt-5.5');
+    expect(reloaded.clearSelectedModel('chat-1', 'opencode', 3000)).toBe(true);
+    await reloaded.flush();
+    expect(JSON.parse(await readFile(file, 'utf8')).settings).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          scopeId: 'chat-1',
+          selectedModels: {},
+          updatedAt: 3000,
+        }),
+      ]),
+    );
   });
 
   it('rejects mismatched Claude/Codex identity fields and does not auto-resume damaged entries', async () => {

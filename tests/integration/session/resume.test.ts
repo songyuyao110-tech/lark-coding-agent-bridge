@@ -1,7 +1,7 @@
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
-import { claudeCapability, codexCapability } from '../../../src/agent/capability.js';
+import { claudeCapability, codexCapability, opencodeCapability } from '../../../src/agent/capability.js';
 import { ActiveRuns } from '../../../src/bot/active-runs.js';
 import { ProcessPool } from '../../../src/bot/process-pool.js';
 import {
@@ -172,9 +172,38 @@ describe('agent-aware run-flow resume', () => {
     ).toMatchObject({ threadId: 'thread-recorded' });
     expect(codex.sessions.getRaw('chat-1')).toBeUndefined();
   });
+
+  it('passes selected chat model to OpenCode runs and records OpenCode sessions', async () => {
+    const h = await createHarness('opencode');
+    h.catalog.setSelectedModel('chat-1', 'opencode', 'github-copilot/gpt-5.5', 1000);
+
+    const run = await start(h);
+
+    expect(run.ok).toBe(true);
+    if (!run.ok) throw new Error('expected opencode run');
+    expect(h.agent.runOptions[0]).toMatchObject({ model: 'github-copilot/gpt-5.5' });
+
+    recordRunSessionEvent({
+      scopeId: 'chat-1',
+      sessions: h.sessions,
+      sessionCatalog: h.catalog,
+      capability: opencodeCapability(h.profileConfig),
+      policy: run.policy,
+      event: { type: 'system', sessionId: 'opencode-session', cwd: run.cwdRealpath },
+    });
+
+    expect(
+      h.catalog.activeFor({
+        scopeId: 'chat-1',
+        agentId: 'opencode',
+        cwdRealpath: run.cwdRealpath,
+        policyFingerprint: run.policy.policyFingerprint,
+      }),
+    ).toMatchObject({ sessionId: 'opencode-session', agentId: 'opencode' });
+  });
 });
 
-async function createHarness(agentKind: 'claude' | 'codex'): Promise<{
+async function createHarness(agentKind: 'claude' | 'codex' | 'opencode'): Promise<{
   tmp: TmpProfile;
   agent: FakeAgentAdapter;
   executor: RunExecutor;
@@ -198,7 +227,8 @@ async function createHarness(agentKind: 'claude' | 'codex'): Promise<{
         tenant: 'feishu',
       },
     },
-    ...(agentKind === 'codex' ? { codex: { binaryPath: '/usr/local/bin/codex' } } : {}),
+      ...(agentKind === 'codex' ? { codex: { binaryPath: '/usr/local/bin/codex' } } : {}),
+      ...(agentKind === 'opencode' ? { opencode: { binaryPath: '/usr/local/bin/opencode' } } : {}),
   });
   const workspaces = new WorkspaceStore(join(tmp.profile, 'workspaces.json'));
   workspaces.setCwd('chat-1', tmp.workspace);
@@ -247,6 +277,8 @@ async function start(h: Awaited<ReturnType<typeof createHarness>>) {
     capability:
       h.profileConfig.agentKind === 'codex'
         ? codexCapability(h.profileConfig)
+        : h.profileConfig.agentKind === 'opencode'
+          ? opencodeCapability(h.profileConfig)
         : claudeCapability(h.profileConfig),
     profileConfig: h.profileConfig,
     sessions: h.sessions,

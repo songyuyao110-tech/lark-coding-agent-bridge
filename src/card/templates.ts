@@ -4,6 +4,15 @@ interface ButtonSpec {
   style?: 'primary' | 'danger' | 'default';
 }
 
+export const COMMON_OPENCODE_MODELS = [
+  { id: 'nexus/gpt-5.5', label: '公司 GPT-5.5' },
+  { id: 'github-copilot/kimi-k3', label: 'Kimi K3' },
+  { id: 'github-copilot/gpt-5.5', label: 'Copilot GPT-5.5' },
+  { id: 'github-copilot/gpt-5.6-luna', label: 'GPT-5.6 Luna' },
+  { id: 'github-copilot/gpt-5.6-sol', label: 'GPT-5.6 Sol' },
+  { id: 'github-copilot/gpt-5.6-terra', label: 'GPT-5.6 Terra（默认）' },
+] as const;
+
 function button(spec: ButtonSpec): object {
   return {
     tag: 'button',
@@ -207,6 +216,23 @@ export function helpCard(agentName = 'Agent'): object {
       { text: '🆕 新会话', value: { cmd: 'new' } },
     ]),
   ]);
+}
+
+export function modelSelectCard(current?: string): object {
+  const elements: object[] = [
+    divMd(`当前模型：${current ? `\`${escapeCode(current)}\`` : 'profile 默认'}`),
+    HR,
+  ];
+  for (let i = 0; i < COMMON_OPENCODE_MODELS.length; i += 2) {
+    const row = COMMON_OPENCODE_MODELS.slice(i, i + 2).map((model) => ({
+      text: model.id === current ? `✅ ${model.label}` : model.label,
+      value: { cmd: 'model', arg: `set ${model.id}` },
+      style: model.id === current ? 'primary' as const : 'default' as const,
+    }));
+    elements.push(actions(row));
+  }
+  elements.push(HR, divMd('也可手动发送 `/model set <provider/model>` 切换任意已配置模型。'));
+  return shell('🤖 选择 OpenCode 模型', elements);
 }
 
 function escapeMd(s: string): string {

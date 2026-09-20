@@ -24,6 +24,12 @@ export interface SessionCatalogEntry extends SessionCatalogIdentity {
   lastSummary?: string;
 }
 
+export interface SessionCatalogScopeSettings {
+  scopeId: string;
+  selectedModels?: Partial<Record<CatalogAgentId, string>>;
+  updatedAt: number;
+}
+
 export interface UpsertSessionCatalogInput extends SessionCatalogIdentity {
   now?: number;
   sessionId?: string;
@@ -58,6 +64,7 @@ export function sessionCatalogKey(input: SessionCatalogIdentity): string {
 
 export class SessionCatalog {
   private data = new Map<string, SessionCatalogEntry>();
+  private settings = new Map<string, SessionCatalogScopeSettings>();
   private saving: Promise<void> = Promise.resolve();
   private readonly path: string;
 
@@ -68,15 +75,25 @@ export class SessionCatalog {
   async load(): Promise<void> {
     try {
       const raw = JSON.parse(await readFile(this.path, 'utf8')) as unknown;
-      if (!Array.isArray(raw)) {
+      const entriesRaw = Array.isArray(raw) ? raw : asCatalogFile(raw)?.entries;
+      const settingsRaw = Array.isArray(raw) ? [] : asCatalogFile(raw)?.settings;
+      if (!Array.isArray(entriesRaw)) {
         this.data.clear();
+        this.settings.clear();
         return;
       }
       this.data.clear();
-      for (const item of raw) {
+      this.settings.clear();
+      for (const item of entriesRaw) {
         const entry = normalizeEntry(item);
         if (!entry) continue;
         this.data.set(entry.key, entry);
+      }
+      if (Array.isArray(settingsRaw)) {
+        for (const item of settingsRaw) {
+          const setting = normalizeSettings(item);
+          if (setting) this.settings.set(setting.scopeId, setting);
+        }
       }
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
@@ -136,6 +153,38 @@ export class SessionCatalog {
     return [...this.data.values()].map((entry) => ({ ...entry }));
   }
 
+  selectedModel(scopeId: string, agentId: CatalogAgentId): string | undefined {
+    return this.settings.get(scopeId)?.selectedModels?.[agentId];
+  }
+
+  setSelectedModel(scopeId: string, agentId: CatalogAgentId, modelId: string, now = Date.now()): void {
+    const existing = this.settings.get(scopeId);
+    this.settings.set(scopeId, {
+      scopeId,
+      selectedModels: { ...(existing?.selectedModels ?? {}), [agentId]: modelId },
+      updatedAt: now,
+    });
+    this.schedulePersist();
+  }
+
+  clearSelectedModel(scopeId: string, agentId: CatalogAgentId, now = Date.now()): boolean {
+    const existing = this.settings.get(scopeId);
+    const selectedModels = { ...(existing?.selectedModels ?? {}) };
+    if (!selectedModels[agentId]) return false;
+    delete selectedModels[agentId];
+    this.settings.set(scopeId, { scopeId, selectedModels, updatedAt: now });
+    this.schedulePersist();
+    return true;
+  }
+
+  scopeSettings(): SessionCatalogScopeSettings[] {
+    return [...this.settings.values()].map((setting) => ({
+      scopeId: setting.scopeId,
+      updatedAt: setting.updatedAt,
+      ...(setting.selectedModels ? { selectedModels: { ...setting.selectedModels } } : {}),
+    }));
+  }
+
   gc(options: SessionCatalogGcOptions = {}): void {
     const now = options.now ?? Date.now();
     const maxArchivedAgeMs = options.maxArchivedAgeMs ?? DEFAULT_MAX_ARCHIVED_AGE_MS;
@@ -186,7 +235,7 @@ export class SessionCatalog {
   private async persist(): Promise<void> {
     await mkdir(dirname(this.path), { recursive: true });
     const tmp = `${this.path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`;
-    const payload = `${JSON.stringify(this.entries(), null, 2)}\n`;
+    const payload = `${JSON.stringify({ entries: this.entries(), settings: this.scopeSettings() }, null, 2)}\n`;
     const fh = await open(tmp, 'w', 0o600);
     try {
       await fh.writeFile(payload, 'utf8');
@@ -208,13 +257,18 @@ export class SessionCatalog {
   }
 }
 
+function asCatalogFile(input: unknown): { entries?: unknown; settings?: unknown } | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  return input as { entries?: unknown; settings?: unknown };
+}
+
 function normalizeEntry(input: unknown): SessionCatalogEntry | undefined {
   if (!input || typeof input !== 'object') return undefined;
   const raw = input as Partial<SessionCatalogEntry>;
   if (
     typeof raw.key !== 'string' ||
     typeof raw.scopeId !== 'string' ||
-    (raw.agentId !== 'claude' && raw.agentId !== 'codex') ||
+    (raw.agentId !== 'claude' && raw.agentId !== 'codex' && raw.agentId !== 'opencode') ||
     typeof raw.cwdRealpath !== 'string' ||
     typeof raw.policyFingerprint !== 'string' ||
     (raw.status !== 'active' && raw.status !== 'archived') ||
@@ -236,6 +290,24 @@ function normalizeEntry(input: unknown): SessionCatalogEntry | undefined {
   };
 }
 
+function normalizeSettings(input: unknown): SessionCatalogScopeSettings | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const raw = input as Partial<SessionCatalogScopeSettings>;
+  if (typeof raw.scopeId !== 'string' || typeof raw.updatedAt !== 'number') return undefined;
+  const selectedModels: Partial<Record<CatalogAgentId, string>> = {};
+  if (raw.selectedModels && typeof raw.selectedModels === 'object') {
+    for (const agentId of ['claude', 'codex', 'opencode'] as const) {
+      const value = raw.selectedModels[agentId];
+      if (typeof value === 'string') selectedModels[agentId] = value;
+    }
+  }
+  return {
+    scopeId: raw.scopeId,
+    updatedAt: raw.updatedAt,
+    ...(Object.keys(selectedModels).length > 0 ? { selectedModels } : {}),
+  };
+}
+
 function matchesIdentity(entry: SessionCatalogEntry, input: SessionCatalogIdentity): boolean {
   return (
     entry.scopeId === input.scopeId &&
@@ -247,14 +319,14 @@ function matchesIdentity(entry: SessionCatalogEntry, input: SessionCatalogIdenti
 }
 
 function isValidAgentEntry(entry: SessionCatalogEntry): boolean {
-  if (entry.agentId === 'claude') return Boolean(entry.sessionId) && !entry.threadId;
+  if (entry.agentId === 'claude' || entry.agentId === 'opencode') return Boolean(entry.sessionId) && !entry.threadId;
   return Boolean(entry.threadId) && !entry.sessionId;
 }
 
 function assertAgentIdentity(input: UpsertSessionCatalogInput): void {
-  if (input.agentId === 'claude') {
+  if (input.agentId === 'claude' || input.agentId === 'opencode') {
     if (!input.sessionId || input.threadId) {
-      throw new Error('Claude catalog entries require sessionId and must not include threadId');
+      throw new Error('Claude/OpenCode catalog entries require sessionId and must not include threadId');
     }
     return;
   }
