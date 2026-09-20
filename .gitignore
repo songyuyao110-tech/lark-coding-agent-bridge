@@ -17,3 +17,11 @@ coverage/
 scripts/
 CHANGELOG.md
 tests-smoke/
+
+# Local-only dev files: machine-specific MCP config, and a stray npm lockfile
+# (this repo installs with pnpm).
+.mcp.json
+package-lock.json
+
+# Archived draft tests that no longer compile against the current API.
+*.superseded

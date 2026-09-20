@@ -137,6 +137,8 @@ export interface AppPreferences {
    * Range 100-30000; out-of-range values fall back to default.
    */
   agentStopGraceMs?: number;
+  /** Model override for claude runs. 'opus' → claude-opus-4-6, 'sonnet' → claude-sonnet-4-6. */
+  model?: 'opus' | 'sonnet';
 }
 
 /**
@@ -244,6 +246,17 @@ export function getAgentStopGraceMs(cfg: AppConfig): number {
   const raw = cfg.preferences?.agentStopGraceMs;
   if (typeof raw !== 'number' || !Number.isFinite(raw)) return 5000;
   return Math.min(30_000, Math.max(100, Math.floor(raw)));
+}
+
+const MODEL_MAP: Record<string, string> = {
+  opus: 'claude-opus-4-6',
+  sonnet: 'claude-sonnet-4-6',
+};
+
+export function getModel(cfg: AppConfig): string | undefined {
+  const raw = cfg.preferences?.model;
+  if (!raw) return undefined;
+  return MODEL_MAP[raw] ?? undefined;
 }
 
 export function getRunIdleTimeoutMs(cfg: AppConfig): number | undefined {

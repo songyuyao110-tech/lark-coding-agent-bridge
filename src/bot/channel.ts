@@ -32,6 +32,7 @@ import {
   getAgentStopGraceMs,
   getMaxConcurrentRuns,
   getMessageReplyMode,
+  getModel,
   getRequireMentionInGroup,
   getRunIdleTimeoutMs,
   getShowToolCalls,
@@ -64,7 +65,13 @@ import { fetchKnownChats } from './lark-info';
 import type { AppPaths } from '../config/app-paths';
 
 const DEBOUNCE_MS = 600;
-const STREAM_TERMINAL_GRACE_MS = 3000;
+/**
+ * How long after a terminal run event the bridge keeps listening for late
+ * stream failures before tearing the stream down. Exported so the test that
+ * exercises this window derives its wait from the real value, instead of a
+ * hardcoded number that silently rots whenever this changes.
+ */
+export const STREAM_TERMINAL_GRACE_MS = 15_000;
 const REACTION_CLEANUP_GRACE_MS = 1000;
 
 const BRIDGE_AGENT_INSTRUCTIONS = [
@@ -708,6 +715,11 @@ async function runAgentBatch(deps: RunBatchDeps): Promise<void> {
     workspaces,
     executor,
     now: Date.now(),
+    model: (() => {
+      const sessionModel = sessions.getSessionModel(scope);
+      if (sessionModel) return getModel({ preferences: { model: sessionModel } } as Parameters<typeof getModel>[0]);
+      return getModel(controls.cfg);
+    })(),
     stopGraceMs: getAgentStopGraceMs(controls.cfg),
     observability: {
       profile: controls.profile,

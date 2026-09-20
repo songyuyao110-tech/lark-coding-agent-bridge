@@ -14,6 +14,8 @@ export interface SessionEntry {
    * scope, undefined = follow global default. Session resets preserve this
    * scope preference while removing the resumable session id/cwd. */
   idleTimeoutMinutes?: number;
+  /** Per-scope model override. Preserved across /new. undefined = follow global default. */
+  model?: 'opus' | 'sonnet';
 }
 
 type SessionMap = Record<string, SessionEntry>;
@@ -43,13 +45,16 @@ export class SessionStore {
         const cwd = typeof entry.cwd === 'string' ? entry.cwd : undefined;
         const idleTimeoutMinutes =
           typeof entry.idleTimeoutMinutes === 'number' ? entry.idleTimeoutMinutes : undefined;
+        const model =
+          entry.model === 'opus' || entry.model === 'sonnet' ? entry.model : undefined;
         const hasSession = sessionId !== undefined && cwd !== undefined;
-        if (!hasSession && idleTimeoutMinutes === undefined) continue;
+        if (!hasSession && idleTimeoutMinutes === undefined && model === undefined) continue;
         this.data[chatId] = {
           ...(sessionId !== undefined ? { sessionId } : {}),
           ...(cwd !== undefined ? { cwd } : {}),
           updatedAt: entry.updatedAt,
           ...(idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes } : {}),
+          ...(model !== undefined ? { model } : {}),
         };
       }
     } catch (err) {
@@ -75,8 +80,7 @@ export class SessionStore {
   }
 
   set(chatId: string, sessionId: string, cwd: string): void {
-    // Preserve idleTimeoutMinutes across run starts — it's a per-scope
-    // preference, not per-run-instance state. /new (clear) wipes it.
+    // Preserve per-scope preferences (idleTimeoutMinutes, model) across run starts.
     const prev = this.data[chatId];
     this.data[chatId] = {
       sessionId,
@@ -85,6 +89,7 @@ export class SessionStore {
       ...(prev?.idleTimeoutMinutes !== undefined
         ? { idleTimeoutMinutes: prev.idleTimeoutMinutes }
         : {}),
+      ...(prev?.model !== undefined ? { model: prev.model } : {}),
     };
     this.schedulePersist();
   }
@@ -92,9 +97,11 @@ export class SessionStore {
   clear(chatId: string): void {
     const prev = this.data[chatId];
     if (!prev) return;
-    if (prev.idleTimeoutMinutes !== undefined) {
+    const hasPrefs = prev.idleTimeoutMinutes !== undefined || prev.model !== undefined;
+    if (hasPrefs) {
       this.data[chatId] = {
-        idleTimeoutMinutes: prev.idleTimeoutMinutes,
+        ...(prev.idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes: prev.idleTimeoutMinutes } : {}),
+        ...(prev.model !== undefined ? { model: prev.model } : {}),
         updatedAt: Date.now(),
       };
     } else {
@@ -125,6 +132,29 @@ export class SessionStore {
     const prev = this.data[chatId];
     if (!prev || prev.idleTimeoutMinutes === undefined) return false;
     const { idleTimeoutMinutes: _, ...rest } = prev;
+    this.data[chatId] = { ...rest, updatedAt: Date.now() };
+    this.schedulePersist();
+    return true;
+  }
+
+  getSessionModel(chatId: string): 'opus' | 'sonnet' | undefined {
+    return this.data[chatId]?.model;
+  }
+
+  setSessionModel(chatId: string, model: 'opus' | 'sonnet'): void {
+    const prev = this.data[chatId];
+    this.data[chatId] = {
+      ...(prev ?? { updatedAt: Date.now() }),
+      model,
+      updatedAt: Date.now(),
+    };
+    this.schedulePersist();
+  }
+
+  clearSessionModelOverride(chatId: string): boolean {
+    const prev = this.data[chatId];
+    if (!prev || prev.model === undefined) return false;
+    const { model: _, ...rest } = prev;
     this.data[chatId] = { ...rest, updatedAt: Date.now() };
     this.schedulePersist();
     return true;

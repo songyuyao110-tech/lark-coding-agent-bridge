@@ -29,6 +29,7 @@ import {
   getAgentStopGraceMs,
   getMaxConcurrentRuns,
   getMessageReplyMode,
+  getModel,
   getRequireMentionInGroup,
   getRunIdleTimeoutMs,
   getShowToolCalls,
@@ -169,6 +170,7 @@ const handlers: Record<string, Handler> = {
   '/config': handleConfig,
   '/stop': handleStop,
   '/timeout': handleTimeout,
+  '/model': handleModel,
   '/ps': handlePs,
   '/exit': handleExit,
   '/doctor': handleDoctor,
@@ -848,6 +850,107 @@ async function handleStop(args: string, ctx: CommandContext): Promise<void> {
   }
   // No reply for the current IM scope: if there was a run, its in-flight
   // render loop will mark the card as interrupted and re-render.
+}
+
+async function handleModel(args: string, ctx: CommandContext): Promise<void> {
+  const VALID_MODELS = ['opus', 'sonnet'] as const;
+  type ModelChoice = typeof VALID_MODELS[number];
+
+  // Parse: /model [opus|sonnet|reset] [--global]
+  const parts = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const isGlobal = parts.includes('--global');
+  const tokens = parts.filter(p => p !== '--global');
+  const cmd = tokens[0] ?? '';
+
+  const sessionModel = ctx.sessions.getSessionModel(ctx.scope);
+  const globalModel = ctx.controls.cfg.preferences?.model;
+  const effectiveChoice = sessionModel ?? globalModel;
+  const effectiveModelId =
+    effectiveChoice
+      ? (getModel({ preferences: { model: effectiveChoice } } as Parameters<typeof getModel>[0]) ?? effectiveChoice)
+      : (getModel(ctx.controls.cfg) ?? process.env.ANTHROPIC_MODEL ?? '未知');
+
+  // /model — show status
+  if (!cmd) {
+    const lines = [
+      `🤖 当前 session 模型: **${sessionModel ?? '未覆盖'}**`,
+      `全局默认: **${globalModel ?? '未设置（跟随环境变量）'}**`,
+      `实际生效: \`${effectiveModelId}\``,
+      '',
+      '用法:',
+      '- `/model opus` 当前 session 切换到 Opus',
+      '- `/model sonnet` 当前 session 切换到 Sonnet',
+      '- `/model opus --global` 全局默认改为 Opus（持久化）',
+      '- `/model reset` 清除当前 session 覆盖',
+      '- `/model reset --global` 清除全局默认',
+    ];
+    await reply(ctx, lines.join('\n'));
+    return;
+  }
+
+  // /model reset [--global]
+  if (cmd === 'reset' || cmd === 'default') {
+    if (isGlobal) {
+      await withConfigFileLock(ctx.controls.configPath, async () => {
+        const root = await loadRootConfig(ctx.controls.configPath);
+        if (root) {
+          const profile = root.profiles[ctx.controls.profile];
+          if (profile) {
+            const { model: _m, ...rest } = profile.preferences ?? {};
+            root.profiles[ctx.controls.profile] = { ...profile, preferences: rest };
+            await saveRootConfig(root, ctx.controls.configPath);
+            ctx.controls.cfg.preferences = rest as AppPreferences;
+          }
+        } else {
+          const { model: _m, ...rest } = ctx.controls.cfg.preferences ?? {};
+          ctx.controls.cfg.preferences = rest as AppPreferences;
+          await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+        }
+      });
+      await reply(ctx, `✅ 已清除全局模型默认，回退到环境变量 (\`${process.env.ANTHROPIC_MODEL ?? '未设置'}\`)。`);
+    } else {
+      const cleared = ctx.sessions.clearSessionModelOverride(ctx.scope);
+      await reply(
+        ctx,
+        cleared
+          ? `✅ 已清除当前 session 模型覆盖，回退到全局默认 (${globalModel ?? '环境变量'})。`
+          : `当前 session 本来就没设过模型覆盖。`,
+      );
+    }
+    return;
+  }
+
+  if (!(VALID_MODELS as readonly string[]).includes(cmd)) {
+    await reply(ctx, `❌ 不支持的模型 \`${cmd}\`，可选: ${VALID_MODELS.join(', ')}`);
+    return;
+  }
+
+  const choice = cmd as ModelChoice;
+  const modelId = getModel({ preferences: { model: choice } } as Parameters<typeof getModel>[0]) ?? choice;
+
+  if (isGlobal) {
+    await withConfigFileLock(ctx.controls.configPath, async () => {
+      const root = await loadRootConfig(ctx.controls.configPath);
+      if (root) {
+        const profile = root.profiles[ctx.controls.profile];
+        if (profile) {
+          root.profiles[ctx.controls.profile] = {
+            ...profile,
+            preferences: { ...(profile.preferences ?? {}), model: choice },
+          };
+          await saveRootConfig(root, ctx.controls.configPath);
+          ctx.controls.cfg.preferences = { ...(ctx.controls.cfg.preferences ?? {}), model: choice };
+        }
+      } else {
+        ctx.controls.cfg.preferences = { ...(ctx.controls.cfg.preferences ?? {}), model: choice };
+        await saveConfig(ctx.controls.cfg, ctx.controls.configPath);
+      }
+    });
+    await reply(ctx, `✅ 全局默认模型已设为 **${choice}** (\`${modelId}\`)，所有未覆盖的 session 生效。`);
+  } else {
+    ctx.sessions.setSessionModel(ctx.scope, choice);
+    await reply(ctx, `✅ 当前 session 模型已切换为 **${choice}** (\`${modelId}\`)，下条消息生效。`);
+  }
 }
 
 async function handleTimeout(args: string, ctx: CommandContext): Promise<void> {

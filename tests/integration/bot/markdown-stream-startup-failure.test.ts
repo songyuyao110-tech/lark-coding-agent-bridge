@@ -3,6 +3,7 @@ import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createDefaultProfileConfig } from '../../../src/config/profile-schema.js';
+import { STREAM_TERMINAL_GRACE_MS } from '../../../src/bot/channel.js';
 import { log } from '../../../src/core/logger.js';
 import { SessionStore } from '../../../src/session/store.js';
 import { WorkspaceStore } from '../../../src/workspace/store.js';
@@ -139,7 +140,7 @@ describe('markdown stream startup failures', () => {
     await waitFor(() => streamProducerStarted);
     await waitFor(
       () => h.channel.rawClient.im.v1.messageReaction.delete.mock.calls.length > 0,
-      4500,
+      STREAM_TERMINAL_GRACE_MS + 1500,
     );
 
     await h.channel.handlers.message?.(message('om_second', 'second'));
@@ -155,7 +156,7 @@ describe('markdown stream startup failures', () => {
         (call[2] as { step?: string } | undefined)?.step === 'stream-terminal-late',
       ),
     );
-  }, 10_000);
+  }, STREAM_TERMINAL_GRACE_MS + 15_000);
 });
 
 async function createHarness(options: {
