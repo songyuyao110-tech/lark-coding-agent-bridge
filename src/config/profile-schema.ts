@@ -13,7 +13,7 @@ import {
   type PermissionSource,
 } from './permissions';
 
-export type AgentKind = 'claude' | 'codex' | 'opencode';
+export type AgentKind = 'claude' | 'codex' | 'opencode' | 'dsh';
 export type SandboxMode = CodexSandboxMode;
 export type { AccessMode, PermissionConfig, PermissionSource };
 
@@ -47,6 +47,21 @@ export interface CodexConfig {
 export interface OpencodeConfig {
   binaryPath: string;
   serverUrl?: string;
+  realpath?: string;
+  version?: string;
+  sha256?: string;
+  owner?: number;
+  mode?: number;
+}
+
+export interface DshConfig {
+  binaryPath: string;
+  /** ACP profile under `$DSH_HOME/profiles` that the adapter boots. */
+  profileName: string;
+  /** Harness home to run against; defaults to the inherited `$DSH_HOME`. */
+  dshHome?: string;
+  /** Maps onto `DSH_PERMISSION_MODE` for the spawned harness. */
+  permissionMode?: 'workspace-write' | 'danger-full-access';
   realpath?: string;
   version?: string;
   sha256?: string;
@@ -101,6 +116,7 @@ export interface ProfileConfig {
   permissionSource?: PermissionSource;
   codex?: CodexConfig;
   opencode?: OpencodeConfig;
+  dsh?: DshConfig;
   attachments: AttachmentConfig;
   comments: CommentConfig;
   larkCli: LarkCliConfig;
@@ -128,6 +144,7 @@ export interface CreateDefaultProfileConfigInput {
   permissions?: Partial<PermissionConfig>;
   codex?: CodexConfig;
   opencode?: OpencodeConfig;
+  dsh?: DshConfig;
   secrets?: SecretsConfig;
 }
 
@@ -163,6 +180,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissions?: Partial<PermissionConfig>;
     codex?: CodexConfig & { flags?: unknown };
     opencode?: OpencodeConfig;
+    dsh?: DshConfig;
     attachments?: Partial<AttachmentConfig>;
     comments?: unknown;
     larkCli?: unknown;
@@ -171,8 +189,13 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
   if (raw.schemaVersion !== 2) {
     throw new Error('profile schemaVersion must be 2');
   }
-  if (raw.agentKind !== 'claude' && raw.agentKind !== 'codex' && raw.agentKind !== 'opencode') {
-    throw new Error('agentKind must be claude, codex, or opencode');
+  if (
+    raw.agentKind !== 'claude' &&
+    raw.agentKind !== 'codex' &&
+    raw.agentKind !== 'opencode' &&
+    raw.agentKind !== 'dsh'
+  ) {
+    throw new Error('agentKind must be claude, codex, opencode, or dsh');
   }
   const accounts = normalizeAccounts(raw.accounts);
   if (raw.agentKind === 'codex' && !raw.codex) {
@@ -180,6 +203,9 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
   }
   if (raw.agentKind === 'opencode' && !raw.opencode) {
     throw new Error('opencode profile requires opencode configuration');
+  }
+  if (raw.agentKind === 'dsh' && !raw.dsh) {
+    throw new Error('dsh profile requires dsh configuration');
   }
 
   const preferences = normalizePreferences(raw.preferences);
@@ -209,6 +235,7 @@ export function normalizeProfileConfig(input: unknown): ProfileConfig {
     permissionSource,
     ...(raw.codex ? { codex: normalizeCodex(raw.codex) } : {}),
     ...(raw.opencode ? { opencode: normalizeOpencode(raw.opencode) } : {}),
+    ...(raw.dsh ? { dsh: normalizeDsh(raw.dsh) } : {}),
     attachments: {
       maxCount: numberOr(raw.attachments?.maxCount, 10),
       maxBytes: numberOr(raw.attachments?.maxBytes, 100 * 1024 * 1024),
@@ -306,6 +333,22 @@ function normalizeOpencode(input: OpencodeConfig): OpencodeConfig {
   return {
     binaryPath: input.binaryPath,
     ...(typeof input.serverUrl === 'string' ? { serverUrl: input.serverUrl } : {}),
+    ...(typeof input.realpath === 'string' ? { realpath: input.realpath } : {}),
+    ...(typeof input.version === 'string' ? { version: input.version } : {}),
+    ...(typeof input.sha256 === 'string' ? { sha256: input.sha256 } : {}),
+    ...(typeof input.owner === 'number' ? { owner: input.owner } : {}),
+    ...(typeof input.mode === 'number' ? { mode: input.mode } : {}),
+  };
+}
+
+function normalizeDsh(input: DshConfig): DshConfig {
+  return {
+    binaryPath: input.binaryPath,
+    profileName: input.profileName,
+    ...(typeof input.dshHome === 'string' ? { dshHome: input.dshHome } : {}),
+    ...(input.permissionMode === 'workspace-write' || input.permissionMode === 'danger-full-access'
+      ? { permissionMode: input.permissionMode }
+      : {}),
     ...(typeof input.realpath === 'string' ? { realpath: input.realpath } : {}),
     ...(typeof input.version === 'string' ? { version: input.version } : {}),
     ...(typeof input.sha256 === 'string' ? { sha256: input.sha256 } : {}),

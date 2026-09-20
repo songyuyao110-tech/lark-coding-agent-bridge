@@ -2,9 +2,11 @@ import { mkdir, readFile, realpath } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import * as p from '@clack/prompts';
 import { runRegistrationWizard } from '../bot/wizard';
+import { DEFAULT_DSH_ACP_PROFILE } from '../agent/dsh/adapter';
 import { detectInstalledAgents, type DetectedAgent } from '../cli/agent-detection';
 import {
   createBootstrapCodexConfig,
+  createBootstrapDshConfig,
   createBootstrapProfileConfig,
   createBootstrapOpencodeConfig,
   resolveBootstrapWorkspace,
@@ -94,7 +96,27 @@ export function createRuntimeProfileConfig(
     ...(input.agentKind === 'opencode'
       ? { opencode: input.opencode ?? { binaryPath: process.env.LARK_CHANNEL_OPENCODE_BIN ?? 'opencode' } }
       : {}),
+    ...(input.agentKind === 'dsh'
+      ? {
+          dsh:
+            input.dsh ??
+            createRuntimeDshConfig(process.env.LARK_CHANNEL_DSH_BIN ?? 'dsh'),
+        }
+      : {}),
   });
+}
+
+/**
+ * The ACP profile must already exist under the harness home; unlike the other
+ * agents there is no binary-only fallback, so point at the shared profile name
+ * and let the adapter report a missing profile through preflight.
+ */
+function createRuntimeDshConfig(binaryPath: string) {
+  return {
+    binaryPath,
+    profileName: DEFAULT_DSH_ACP_PROFILE,
+    ...(process.env.DSH_HOME ? { dshHome: process.env.DSH_HOME } : {}),
+  };
 }
 
 export async function resolveProfileRuntime(
@@ -112,7 +134,7 @@ export async function resolveProfileRuntime(
   if (!profile && opts.allowBootstrap) {
     const detected = await detectInstalledAgents();
     if (detected.length === 0) {
-      throw new Error('no supported local agent found; install claude or codex first');
+      throw new Error('no supported local agent found; install claude, codex, opencode, or dsh first');
     }
     if (detected.length > 1) {
       const selected = await selectDetectedAgent(detected, opts.selectAgent);
@@ -144,6 +166,9 @@ export async function resolveProfileRuntime(
       : {}),
     ...(needsMigration && migrationAgent === 'opencode'
       ? { opencode: await createBootstrapOpencodeConfig(undefined) }
+      : {}),
+    ...(needsMigration && migrationAgent === 'dsh'
+      ? { dsh: await createBootstrapDshConfig() }
       : {}),
   }, opts.handleActiveBridgeMigrationConflict);
 
@@ -575,7 +600,7 @@ function formatAmbiguousAgentSelectionError(
 ): string {
   const lines = detected.map((agent) => `  - ${agent.kind}: ${agent.binaryPath}`);
   return [
-    '检测到多个本地 agent，请使用 --agent <claude|codex> 指定要初始化哪一个。',
+    '检测到多个本地 agent，请使用 --agent <claude|codex|opencode|dsh> 指定要初始化哪一个。',
     '已检测到：',
     ...lines,
   ].join('\n');
@@ -622,6 +647,7 @@ class UserCancelledError extends Error {
 function displayAgentKind(kind: AgentKind): string {
   if (kind === 'claude') return 'Claude Code';
   if (kind === 'codex') return 'Codex CLI';
+  if (kind === 'dsh') return 'DSH';
   return 'OpenCode CLI';
 }
 

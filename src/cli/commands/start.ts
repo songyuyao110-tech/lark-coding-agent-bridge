@@ -5,6 +5,7 @@ import pkg from '../../../package.json';
 import { ClaudeAdapter } from '../../agent/claude/adapter';
 import { CodexAdapter } from '../../agent/codex/adapter';
 import { OpenCodeAdapter } from '../../agent/opencode/adapter';
+import { DshAdapter } from '../../agent/dsh/adapter';
 import {
   AgentPreflightError,
   formatAgentPreflightDiagnostic,
@@ -375,9 +376,16 @@ async function checkRuntimeAgentAvailability(agent: AgentAdapter): Promise<Agent
   if (ok) return { ok: true };
   const diagnostic = {
     code: 'agent-binary-not-found' as const,
-    agentId: agent.id === 'codex' ? 'codex' as const : agent.id === 'opencode' ? 'opencode' as const : 'claude' as const,
+    agentId:
+      agent.id === 'codex'
+        ? ('codex' as const)
+        : agent.id === 'opencode'
+          ? ('opencode' as const)
+          : agent.id === 'dsh'
+            ? ('dsh' as const)
+            : ('claude' as const),
     agentName: agent.displayName,
-    command: agent.id === 'codex' ? 'codex' : 'claude',
+    command: agent.id === 'claude' ? 'claude' : agent.id,
   };
   return {
     ok: false,
@@ -440,6 +448,16 @@ export function createRuntimeAgent(
     if (!opencode?.binaryPath) throw new Error('opencode profile requires opencode.binaryPath');
     return new OpenCodeAdapter({
       binaryPath: opencode.binaryPath,
+    });
+  }
+  if (profileConfig.agentKind === 'dsh') {
+    const dsh = profileConfig.dsh;
+    if (!dsh?.binaryPath) throw new Error('dsh profile requires dsh.binaryPath');
+    return new DshAdapter({
+      binaryPath: dsh.binaryPath,
+      profileName: dsh.profileName,
+      ...(dsh.dshHome ? { dshHome: dsh.dshHome } : {}),
+      ...(dsh.permissionMode ? { permissionMode: dsh.permissionMode } : {}),
     });
   }
   return new ClaudeAdapter({ larkChannel });

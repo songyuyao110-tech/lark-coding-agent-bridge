@@ -3,7 +3,7 @@ import { readFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, isAbsolute } from 'node:path';
 import type { LarkChannel, NormalizedMessage } from '@larksuite/channel';
-import { claudeCapability, codexCapability, opencodeCapability } from '../agent/capability';
+import { capabilityForProfile, type AgentCapabilityId } from '../agent/capability';
 import type { AgentAdapter } from '../agent/types';
 import { OpenCodeModelCatalog, type OpenCodeModelEntry } from '../agent/opencode/model-catalog';
 import type { ActiveRuns } from '../bot/active-runs';
@@ -146,7 +146,7 @@ type Handler = (args: string, ctx: CommandContext) => Promise<void>;
 
 interface ResumeCandidate {
   scopeId: string;
-  agentId: 'claude' | 'codex' | 'opencode';
+  agentId: AgentCapabilityId;
   cwdRealpath: string;
   policyFingerprint: string;
   sessionId?: string;
@@ -1197,11 +1197,7 @@ async function handleDoctor(args: string, ctx: CommandContext): Promise<void> {
   }
   doctorLastByOperator.set(rateKey, now);
 
-  const capability = ctx.controls.profileConfig.agentKind === 'codex'
-    ? codexCapability(ctx.controls.profileConfig)
-    : ctx.controls.profileConfig.agentKind === 'opencode'
-      ? opencodeCapability(ctx.controls.profileConfig)
-      : claudeCapability(ctx.controls.profileConfig);
+  const capability = capabilityForProfile(ctx.controls.profileConfig);
   const policy = evaluateRunPolicy({
     scope: {
       source: 'im',

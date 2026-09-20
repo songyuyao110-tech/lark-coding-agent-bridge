@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { mkdir } from 'node:fs/promises';
 import { dirname } from 'node:path';
 import type { CommentEvent, LarkChannel } from '@larksuite/channel';
-import { claudeCapability, codexCapability, opencodeCapability } from '../agent/capability';
+import { capabilityForProfile } from '../agent/capability';
 import type { AgentAdapter, AgentEvent } from '../agent/types';
 import { getAgentStopGraceMs } from '../config/schema';
 import type { Controls } from '../commands';
@@ -181,11 +181,7 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
     : false;
 
   try {
-      const capability = controls.profileConfig.agentKind === 'codex'
-        ? codexCapability(controls.profileConfig)
-        : controls.profileConfig.agentKind === 'opencode'
-          ? opencodeCapability(controls.profileConfig)
-          : claudeCapability(controls.profileConfig);
+      const capability = capabilityForProfile(controls.profileConfig);
     const runTimeoutMs = commentRunTimeoutMs(sessions, runScopeId);
     const threadTimeoutMs = commentRunTimeoutMs(sessions, commentThreadScopeId);
     const commentTimeoutMs = runTimeoutMs !== undefined ? runTimeoutMs : threadTimeoutMs;
@@ -239,7 +235,10 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
           })
         : undefined;
         const sessionId =
-          canResumeAgentSession && (capability.agentId === 'claude' || capability.agentId === 'opencode')
+          canResumeAgentSession &&
+            (capability.agentId === 'claude' ||
+              capability.agentId === 'opencode' ||
+              capability.agentId === 'dsh')
           ? sessions.resumeFor(docSessionScopeId, cwdRealpath) ??
             sessions.resumeFor(legacyDocSessionScopeId, cwdRealpath)
           : undefined;
@@ -324,7 +323,13 @@ export async function handleCommentMention(deps: CommentDeps): Promise<void> {
             policy,
             event: e,
           });
-          if ((capability.agentId === 'claude' || capability.agentId === 'opencode') && e.type === 'system' && e.sessionId) {
+          if (
+            (capability.agentId === 'claude' ||
+              capability.agentId === 'opencode' ||
+              capability.agentId === 'dsh') &&
+            e.type === 'system' &&
+            e.sessionId
+          ) {
             sessions.set(docSessionScopeId, e.sessionId, policy.cwdRealpath);
           }
           switch (e.type) {
