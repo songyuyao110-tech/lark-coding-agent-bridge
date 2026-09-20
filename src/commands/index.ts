@@ -578,9 +578,13 @@ async function handleResume(args: string, ctx: CommandContext): Promise<void> {
     return;
   }
 
-  const sessions = ctx.controls.profileConfig.agentKind === 'opencode'
-    ? []
-    : await listClaudeResumeHistory(ctx, cwd, limit);
+  // Only Claude/Codex sessions are discoverable from local state; opencode and
+// dsh own their session stores, so there is nothing to list here.
+  const agentKind = ctx.controls.profileConfig.agentKind;
+  const sessions =
+    agentKind === 'opencode' || agentKind === 'dsh'
+      ? []
+      : await listClaudeResumeHistory(ctx, cwd, limit);
   const currentSession = ctx.sessions.getRaw(ctx.scope);
   const identity = ctx.sessionCatalogIdentity;
   const entries = sessions.map((s) => ({
