@@ -321,15 +321,23 @@ function matchesIdentity(entry: SessionCatalogEntry, input: SessionCatalogIdenti
   );
 }
 
+/**
+ * Codex is the only agent that identifies its conversation with a thread id;
+ * Claude, OpenCode and DSH all resume by session id. Keeping the exception in
+ * one place stops a newly added agent from silently falling into the Codex
+ * branch.
+ */
 function isValidAgentEntry(entry: SessionCatalogEntry): boolean {
-  if (entry.agentId === 'claude' || entry.agentId === 'opencode') return Boolean(entry.sessionId) && !entry.threadId;
-  return Boolean(entry.threadId) && !entry.sessionId;
+  if (entry.agentId === 'codex') return Boolean(entry.threadId) && !entry.sessionId;
+  return Boolean(entry.sessionId) && !entry.threadId;
 }
 
 function assertAgentIdentity(input: UpsertSessionCatalogInput): void {
-  if (input.agentId === 'claude' || input.agentId === 'opencode') {
+  if (input.agentId !== 'codex') {
     if (!input.sessionId || input.threadId) {
-      throw new Error('Claude/OpenCode catalog entries require sessionId and must not include threadId');
+      throw new Error(
+        `${input.agentId} catalog entries require sessionId and must not include threadId`,
+      );
     }
     return;
   }
